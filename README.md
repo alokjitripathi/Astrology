@@ -92,6 +92,7 @@ Render creates `DATABASE_URL` from the database's private connection string and 
 
 The Blueprint currently selects Render's Free plans to avoid assuming a paid plan. Render's free PostgreSQL databases expire 30 days after creation and are intended for evaluation, not long-term production data. Before relying on customer accounts or enquiry data, change the database plan to a paid plan in `render.yaml` and sync the Blueprint. [Render's Free instance limits](https://render.com/docs/free)
 
+
 Consultation forms save enquiries to PostgreSQL and open a WhatsApp draft; the visitor must send it in WhatsApp. The project does not use WhatsApp API credentials. The Blogger archive continues to load from its existing public feed and needs no Render secret variables. Set `siteUrl` in `frontend/assets/site-config.js` after choosing a production domain if canonical and social metadata should use it.
 
 Use a trusted production email provider before enabling email verification or password recovery, and review the privacy policy and data-retention practices before launch.
