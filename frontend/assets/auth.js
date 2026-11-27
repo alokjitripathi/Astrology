@@ -29,6 +29,10 @@
       "An account with this email already exists.": "इस ईमेल से खाता पहले से मौजूद है।",
       "Use a password that is at least 12 characters long.": "कम से कम 12 अक्षरों का पासवर्ड इस्तेमाल करें।",
       "Too many attempts. Please wait before trying again.": "बहुत अधिक प्रयास हुए। कृपया कुछ देर बाद फिर प्रयास करें।",
+      "Verify your email address before signing in. Check your inbox for a verification link.": "साइन इन करने से पहले ईमेल सत्यापित करें। सत्यापन लिंक के लिए अपना इनबॉक्स देखें।",
+      "Email verification is not configured yet.": "ईमेल सत्यापन अभी सेट नहीं है।",
+      "Current password is incorrect.": "वर्तमान पासवर्ड सही नहीं है।",
+      "Sign in with Google again before setting a password.": "पासवर्ड बनाने से पहले Google से फिर साइन इन करें।",
       "Account services are unavailable. Configure PostgreSQL in .env and start the Node.js server with npm start.": "खाता सेवा उपलब्ध नहीं है। .env में PostgreSQL सेट करें और npm start से Node.js सर्वर शुरू करें।"
     };
     setError(form.querySelector(".form-error"), isHindi ? (translated[message] || "अनुरोध पूरा नहीं हो सका। कृपया फिर प्रयास करें।") : message);
@@ -60,17 +64,50 @@
             password: data.get("password"),
             ...(endpoint === "/api/signup" ? {
               firstName: String(data.get("firstName") || "").trim(),
-              lastName: String(data.get("lastName") || "").trim()
+              lastName: String(data.get("lastName") || "").trim(),
+              privacyConsent: data.get("privacyConsent") === "on"
             } : {})
           })
         });
-        window.location.assign("index.html");
+        window.location.assign(endpoint === "/api/signup" ? "login.html?verification=sent" : "index.html");
       } catch (requestError) {
         authError(form, requestError.message);
       } finally {
         button.disabled = false;
       }
     });
+  }
+
+  function setupAuthStatus() {
+    const status = document.getElementById("auth-status");
+    if (!status) return;
+    const params = new URLSearchParams(window.location.search);
+    const verification = params.get("verification");
+    const auth = params.get("auth");
+    const messages = {
+      "verification:sent": [
+        "If an account can be created for this email, a verification link has been sent. It expires in one hour.",
+        "यदि इस ईमेल से खाता बनाया जा सकता है, तो सत्यापन लिंक भेज दिया गया है। यह एक घंटे में समाप्त होगा।"
+      ],
+      "verification:invalid": [
+        "This verification link is invalid, expired, or already used. Sign in to request another link.",
+        "यह सत्यापन लिंक अमान्य, समाप्त या पहले इस्तेमाल हो चुका है। नया लिंक पाने के लिए साइन इन करें।"
+      ],
+      "auth:google_failed": [
+        "Google sign-in could not be completed. Please try again.",
+        "Google से साइन इन नहीं हो सका। कृपया फिर प्रयास करें।"
+      ],
+      "auth:google_unconfigured": [
+        "Google sign-in is not set up yet. Use email sign-up or try again later.",
+        "Google साइन-इन अभी सेट नहीं है। ईमेल से खाता बनाएँ या बाद में फिर कोशिश करें।"
+      ]
+    };
+    const message = messages[(verification ? "verification:" + verification : "auth:" + auth)];
+    if (!message) return;
+    status.dataset.en = message[0];
+    status.dataset.hi = message[1];
+    status.innerHTML = language() === "hi" ? message[1] : message[0];
+    status.hidden = false;
   }
 
   function makeElement(tag, className, text) {
@@ -786,6 +823,7 @@
 
   configureAuthForm(document.getElementById("login-form"), "/api/login");
   configureAuthForm(document.getElementById("signup-form"), "/api/signup");
+  setupAuthStatus();
   setupPasswordChange();
   setupAccountNavigation();
   redirectSignedInAuthPage();

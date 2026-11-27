@@ -3,13 +3,54 @@ CREATE TABLE IF NOT EXISTS public.astro_users (
     first_name VARCHAR(80),
     last_name VARCHAR(80),
     email VARCHAR(254) NOT NULL UNIQUE,
-    password_hash TEXT NOT NULL,
+    password_hash TEXT,
     role TEXT NOT NULL DEFAULT 'customer' CHECK (role IN ('customer', 'admin')),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 ALTER TABLE public.astro_users ADD COLUMN IF NOT EXISTS first_name VARCHAR(80);
 ALTER TABLE public.astro_users ADD COLUMN IF NOT EXISTS last_name VARCHAR(80);
+ALTER TABLE public.astro_users ADD COLUMN IF NOT EXISTS google_sub TEXT;
+ALTER TABLE public.astro_users ADD COLUMN IF NOT EXISTS email_verified_at TIMESTAMPTZ;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM public.astro_users
+        GROUP BY lower(email) HAVING COUNT(*) > 1
+    ) THEN
+        CREATE UNIQUE INDEX IF NOT EXISTS astro_users_email_lower_idx
+            ON public.astro_users (lower(email));
+    END IF;
+END $$;
+
+CREATE UNIQUE INDEX IF NOT EXISTS astro_users_google_sub_idx
+    ON public.astro_users (google_sub)
+    WHERE google_sub IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS public.email_verification_tokens (
+    token_hash CHAR(64) PRIMARY KEY,
+    user_id BIGINT NOT NULL REFERENCES public.astro_users(id) ON DELETE CASCADE,
+    expires_at TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS email_verification_tokens_user_idx
+    ON public.email_verification_tokens (user_id);
+
+CREATE TABLE IF NOT EXISTS public.google_oauth_states (
+    state_hash CHAR(64) PRIMARY KEY,
+    nonce TEXT NOT NULL,
+    code_verifier TEXT NOT NULL,
+    expires_at TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS public.auth_rate_limits (
+    bucket_key CHAR(64) PRIMARY KEY,
+    window_started_at TIMESTAMPTZ NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0
+);
 
 CREATE UNIQUE INDEX IF NOT EXISTS astro_users_single_admin_idx
     ON public.astro_users ((role))

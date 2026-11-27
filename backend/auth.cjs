@@ -6,20 +6,26 @@ const { promisify } = require("node:util");
 const scrypt = promisify(crypto.scrypt);
 const PASSWORD_BYTES_MIN = 12;
 const PASSWORD_BYTES_MAX = 256;
+const CURRENT_SCRYPT_OPTIONS = { N: 32768, r: 8, p: 1, maxmem: 128 * 1024 * 1024 };
 
 async function hashPassword(password) {
   const salt = crypto.randomBytes(16);
-  const derivedKey = await scrypt(password, salt, 64);
-  return "scrypt$" + salt.toString("hex") + "$" + derivedKey.toString("hex");
+  const derivedKey = await scrypt(password, salt, 64, CURRENT_SCRYPT_OPTIONS);
+  return "scrypt$2$" + salt.toString("hex") + "$" + derivedKey.toString("hex");
 }
 
 async function verifyPassword(password, passwordHash) {
+  if (typeof passwordHash !== "string") return false;
   const parts = passwordHash.split("$");
-  if (parts.length !== 3 || parts[0] !== "scrypt" || !/^[a-f0-9]{32}$/.test(parts[1]) || !/^[a-f0-9]{128}$/.test(parts[2])) {
-    return false;
-  }
-  const expected = Buffer.from(parts[2], "hex");
-  const actual = await scrypt(password, Buffer.from(parts[1], "hex"), expected.length);
+  const legacy = parts.length === 3 && parts[0] === "scrypt";
+  const current = parts.length === 4 && parts[0] === "scrypt" && parts[1] === "2";
+  const saltHex = legacy ? parts[1] : current ? parts[2] : "";
+  const keyHex = legacy ? parts[2] : current ? parts[3] : "";
+  if (!/^[a-f0-9]{32}$/.test(saltHex) || !/^[a-f0-9]{128}$/.test(keyHex)) return false;
+  const expected = Buffer.from(keyHex, "hex");
+  const actual = legacy
+    ? await scrypt(password, Buffer.from(saltHex, "hex"), expected.length)
+    : await scrypt(password, Buffer.from(saltHex, "hex"), expected.length, CURRENT_SCRYPT_OPTIONS);
   return crypto.timingSafeEqual(expected, actual);
 }
 

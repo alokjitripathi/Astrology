@@ -50,9 +50,10 @@ Run the backend and account tests with `npm test`.
 ## Accounts
 
 - Customers can create an account at `/signup.html`, sign in at `/login.html`, and view their own enquiries at `/dashboard.html`.
-- Signup and sign-in create a persistent customer session. The header shows the account link and a **Log out** button while signed in. Successful signup and sign-in return to the home page.
+- Customers can sign in with Google or create an account with email and password. Email accounts must verify their email address before signing in. Sessions expire after 30 days; password changes revoke other active sessions.
+- Google sign-in uses Google's OAuth authorization-code flow with state and PKCE checks. Accounts are matched only using Google's verified email claim.
 - There is no public astrologer account or astrologer sign-in. Public signup can only create customer accounts.
-- Email verification and password-reset messages are not enabled until an email delivery provider is configured.
+- Email verification links are sent through Resend and expire after one hour. New email signups need `RESEND_API_KEY` and `EMAIL_FROM` configured before signup is available.
 - Signed-in customers can start a one-to-one, text-only chat from their account and submit one anonymous public review. Reviews publish immediately after explicit consent.
 
 ## Configure before launch
@@ -75,8 +76,15 @@ To deploy the full application:
 
 1. Create a PostgreSQL database with a provider such as Neon. Use its pooled connection string for serverless connections.
 2. In Vercel, import `alokjitripathi/Astrology` and deploy the `main` branch. Leave the project root at the repository root; `vercel.json` configures the static output and API function.
-3. In the Vercel project's **Settings → Environment Variables**, add `DATABASE_URL` with the PostgreSQL connection string and `WHATSAPP_NUMBER` with the public number in digits only, including the country code. Do not commit either value to Git.
-4. Redeploy after setting the variables. The API initializes the tables from `database/schema.sql` when it first connects to PostgreSQL.
+3. Set these variables in the Vercel project's **Settings → Environment Variables** for Production (and Preview if needed):
+   - `DATABASE_URL`: PostgreSQL connection string.
+   - `WHATSAPP_NUMBER`: public number in digits only, including the country code.
+   - `PUBLIC_SITE_URL`: the deployed HTTPS origin, without a trailing slash (for example, `https://astroaloktripathi.in`).
+   - `RESEND_API_KEY` and `EMAIL_FROM`: Resend API key and a sender address on a domain verified with Resend. These enable signup verification emails.
+   - `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`: credentials for a Google OAuth **Web application** client.
+   - `GOOGLE_REDIRECT_URI`: exactly `https://your-domain.example/api/google/callback`.
+4. In Google Cloud Console, configure the OAuth consent screen and add your production domain as an authorized domain. Add `https://your-domain.example` as an authorized JavaScript origin and the exact `GOOGLE_REDIRECT_URI` above as an authorized redirect URI. Replace the example domain with the same value used for `PUBLIC_SITE_URL`.
+5. Do not commit secrets to Git. Redeploy after setting the variables. The API initializes the tables from `database/schema.sql` when it first connects to PostgreSQL. Existing accounts created before email verification was added need to verify their email at their next sign-in; a Google sign-in with the same Google-verified email can verify and link that account.
 
 Vercel Functions support WebSockets; chat connections close when a function reaches its maximum duration and the website reconnects and reloads saved messages. The Blogger article archive continues to use the public Blogger feed. Creating a production database and setting its connection string are required before accounts, saved enquiries, feedback, or chat can work.
 
@@ -100,4 +108,4 @@ The Blueprint currently selects Render's Free plans to avoid assuming a paid pla
 
 Consultation forms save enquiries to PostgreSQL and open a WhatsApp draft; the visitor must send it in WhatsApp. The project does not use WhatsApp API credentials. The Blogger archive continues to load from its existing public feed and needs no Render secret variables. Set `siteUrl` in `frontend/assets/site-config.js` after choosing a production domain if canonical and social metadata should use it.
 
-Use a trusted production email provider before enabling email verification or password recovery, and review the privacy policy and data-retention practices before launch.
+Email verification requires a configured Resend sender. Google sign-in requires a Google OAuth client and the matching Vercel environment variables. Review the privacy policy and data-retention practices before launch.

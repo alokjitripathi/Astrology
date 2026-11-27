@@ -643,6 +643,13 @@ main { position: relative; z-index: 1; flex: 1 0 auto; }
 
 .account-narrow { width: min(650px, calc(100% - 40px)); margin: 0 auto; }
 .account-form { width: 100%; }
+.google-auth-button { display: flex; min-height: 48px; align-items: center; justify-content: center; gap: 12px; margin-top: 22px; padding: 10px 16px; color: #273143; border: 1px solid #d4d8df; border-radius: 3px; background: #fff; font-size: 13px; font-weight: 600; text-decoration: none; transition: border-color .18s ease, box-shadow .18s ease; }
+.google-auth-button:hover, .google-auth-button:focus-visible { border-color: #9ba8ba; box-shadow: 0 2px 10px rgba(16,28,54,.1); }
+.google-mark { display: inline-grid; width: 22px; height: 22px; place-items: center; color: #4285f4; font-family: Arial, sans-serif; font-size: 21px; font-weight: 700; }
+.auth-divider { display: flex; align-items: center; gap: 14px; margin: 19px 0; color: #7b8390; font-size: 10px; text-align: center; }
+.auth-divider::before, .auth-divider::after { height: 1px; flex: 1; background: rgba(16,28,54,.12); content: ""; }
+.auth-status { color: #365b46; }
+.auth-status[hidden] { display: none; }
 .account-form .account-switch { margin: 24px 0 0; color: var(--muted); text-align: center; }
 .account-switch a { color: #745b28; font-weight: 700; text-underline-offset: 4px; }
 .form-submit:disabled, .account-form button:disabled { opacity: .62; cursor: wait; }

@@ -13,11 +13,15 @@ const MAX_BODY_BYTES = 128 * 1024;
 const MAX_CHAT_MESSAGE_LENGTH = 2000;
 const CHAT_RATE_WINDOW_MS = 60 * 1000;
 const CHAT_RATE_MAX_MESSAGES = 30;
-const SESSION_DAYS = 3650;
+const SESSION_DAYS = 30;
 const SESSION_COOKIE = "astro_session";
 const RATE_WINDOW_MS = 15 * 60 * 1000;
 const RATE_MAX_ATTEMPTS = 10;
-const rateLimits = new Map();
+const DUMMY_PASSWORD_HASH = "scrypt$2$" + "0".repeat(32) + "$" + "0".repeat(128);
+const GOOGLE_STATE_COOKIE = "astro_google_state";
+const GOOGLE_STATE_TTL_SECONDS = 600;
+const EMAIL_VERIFICATION_TTL_HOURS = 1;
+let googleKeysCache = null;
 const MIME_TYPES = {
   ".css": "text/css; charset=utf-8",
   ".html": "text/html; charset=utf-8",
@@ -147,16 +151,35 @@ function cookieValue(request, name) {
   return pair ? pair.slice(name.length + 1) : "";
 }
 
+function appendCookie(response, value) {
+  const current = response.getHeader("Set-Cookie");
+  response.setHeader("Set-Cookie", current ? [...(Array.isArray(current) ? current : [current]), value] : value);
+}
+
+function secureCookieSuffix() {
+  return process.env.NODE_ENV === "production" || process.env.VERCEL === "1" ? "; Secure" : "";
+}
+
 function setSessionCookie(response, token) {
-  const secure = process.env.NODE_ENV === "production" ? "; Secure" : "";
-  response.setHeader("Set-Cookie",
-    SESSION_COOKIE + "=" + token + "; Path=/; HttpOnly; SameSite=Strict; Max-Age="
+  const secure = secureCookieSuffix();
+  appendCookie(response, SESSION_COOKIE + "=" + token + "; Path=/; HttpOnly; SameSite=Lax; Max-Age="
     + (SESSION_DAYS * 24 * 60 * 60) + secure);
 }
 
 function clearSessionCookie(response) {
-  const secure = process.env.NODE_ENV === "production" ? "; Secure" : "";
-  response.setHeader("Set-Cookie", SESSION_COOKIE + "=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0" + secure);
+  const secure = secureCookieSuffix();
+  appendCookie(response, SESSION_COOKIE + "=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0" + secure);
+}
+
+function setGoogleStateCookie(response, state) {
+  const secure = secureCookieSuffix();
+  appendCookie(response, GOOGLE_STATE_COOKIE + "=" + state + "; Path=/; HttpOnly; SameSite=Lax; Max-Age="
+    + GOOGLE_STATE_TTL_SECONDS + secure);
+}
+
+function clearGoogleStateCookie(response) {
+  const secure = secureCookieSuffix();
+  appendCookie(response, GOOGLE_STATE_COOKIE + "=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0" + secure);
 }
 
 async function currentUser(request, pool) {
@@ -166,7 +189,8 @@ async function currentUser(request, pool) {
     `SELECT u.id, u.first_name, u.last_name, u.email, u.role, u.created_at
      FROM public.login_sessions s
      JOIN public.astro_users u ON u.id = s.user_id
-     WHERE s.token_hash = $1 AND s.expires_at > NOW() AND u.role = 'customer'`,
+     WHERE s.token_hash = $1 AND s.expires_at > NOW()
+       AND u.role = 'customer' AND u.email_verified_at IS NOT NULL`,
     [hashSessionToken(token)]
   );
   return result.rows[0] || null;
@@ -182,18 +206,29 @@ function sameOrigin(request) {
   }
 }
 
-function rateLimited(request, endpoint, response) {
-  const now = Date.now();
-  const ip = request.socket.remoteAddress || "unknown";
-  const key = endpoint + ":" + ip;
-  const previous = rateLimits.get(key);
-  if (!previous || previous.startedAt + RATE_WINDOW_MS <= now) {
-    rateLimits.set(key, { startedAt: now, attempts: 1 });
-    return false;
-  }
-  previous.attempts += 1;
-  if (previous.attempts <= RATE_MAX_ATTEMPTS) return false;
-  const retrySeconds = Math.ceil((previous.startedAt + RATE_WINDOW_MS - now) / 1000);
+async function rateLimited(pool, request, endpoint, response) {
+  const forwardedFor = request.headers["x-forwarded-for"];
+  const ip = (typeof forwardedFor === "string" ? forwardedFor.split(",").map((part) => part.trim()).filter(Boolean).at(-1) : "")
+    || request.socket.remoteAddress || "unknown";
+  const bucketKey = crypto.createHash("sha256").update(endpoint + ":" + ip).digest("hex");
+  const result = await pool.query(
+    `INSERT INTO public.auth_rate_limits (bucket_key, window_started_at, attempts)
+     VALUES ($1, NOW(), 1)
+     ON CONFLICT (bucket_key) DO UPDATE SET
+       attempts = CASE
+         WHEN auth_rate_limits.window_started_at + ($2::double precision * INTERVAL '1 millisecond') <= NOW() THEN 1
+         ELSE auth_rate_limits.attempts + 1
+       END,
+       window_started_at = CASE
+         WHEN auth_rate_limits.window_started_at + ($2::double precision * INTERVAL '1 millisecond') <= NOW() THEN NOW()
+         ELSE auth_rate_limits.window_started_at
+       END
+     RETURNING attempts, window_started_at`,
+    [bucketKey, RATE_WINDOW_MS]
+  );
+  const row = result.rows[0];
+  if (!row || row.attempts <= RATE_MAX_ATTEMPTS) return false;
+  const retrySeconds = Math.max(1, Math.ceil((new Date(row.window_started_at).getTime() + RATE_WINDOW_MS - Date.now()) / 1000));
   response.setHeader("Retry-After", String(retrySeconds));
   sendJson(response, 429, { error: "Too many attempts. Please wait before trying again." });
   return true;
@@ -216,10 +251,321 @@ async function createLoginSession(client, userId) {
   const token = crypto.randomBytes(32).toString("hex");
   const tokenHash = hashSessionToken(token);
   await client.query(
-    "INSERT INTO public.login_sessions (token_hash, user_id, expires_at) VALUES ($1, $2, NOW() + INTERVAL '10 years')",
-    [tokenHash, userId]
+    "INSERT INTO public.login_sessions (token_hash, user_id, expires_at) VALUES ($1, $2, NOW() + ($3::int * INTERVAL '1 day'))",
+    [tokenHash, userId, SESSION_DAYS]
   );
   return token;
+}
+
+function appOrigin(request) {
+  if (process.env.PUBLIC_SITE_URL) {
+    const configured = new URL(process.env.PUBLIC_SITE_URL);
+    if (process.env.NODE_ENV === "production" && configured.protocol !== "https:") {
+      throw new Error("PUBLIC_SITE_URL must use HTTPS in production.");
+    }
+    return configured.origin;
+  }
+  if (process.env.NODE_ENV === "production") throw new Error("PUBLIC_SITE_URL is required in production.");
+  const host = request.headers["x-forwarded-host"] || request.headers.host;
+  if (!host || /[\s/\\@]/.test(host)) throw new Error("Could not determine the website origin.");
+  const protocol = request.headers["x-forwarded-proto"] || (request.socket.encrypted ? "https" : "http");
+  return new URL(protocol + "://" + host).origin;
+}
+
+function googleConfig(request) {
+  const clientId = process.env.GOOGLE_CLIENT_ID;
+  const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
+  if (!clientId || !clientSecret) throw new Error("Google sign-in is not configured yet.");
+  const redirectUri = process.env.GOOGLE_REDIRECT_URI
+    ? new URL(process.env.GOOGLE_REDIRECT_URI).href
+    : new URL("/api/google/callback", appOrigin(request)).href;
+  const redirect = new URL(redirectUri);
+  if (process.env.NODE_ENV === "production" && redirect.protocol !== "https:") {
+    throw new Error("Google redirect URI must use HTTPS in production.");
+  }
+  return { clientId, clientSecret, redirectUri };
+}
+
+function redirectTo(response, location) {
+  response.writeHead(302, { Location: location, "Cache-Control": "no-store" });
+  response.end();
+}
+
+function safeEqualText(left, right) {
+  if (typeof left !== "string" || typeof right !== "string") return false;
+  const leftBuffer = Buffer.from(left);
+  const rightBuffer = Buffer.from(right);
+  return leftBuffer.length === rightBuffer.length && crypto.timingSafeEqual(leftBuffer, rightBuffer);
+}
+
+async function beginGoogleSignIn(request, response, pool) {
+  let config;
+  try {
+    config = googleConfig(request);
+  } catch {
+    try {
+      redirectTo(response, new URL("/login.html?auth=google_unconfigured", appOrigin(request)).href);
+    } catch {
+      sendJson(response, 503, { error: "Google sign-in is not configured yet." });
+    }
+    return;
+  }
+  const state = crypto.randomBytes(32).toString("base64url");
+  const nonce = crypto.randomBytes(32).toString("base64url");
+  const verifier = crypto.randomBytes(48).toString("base64url");
+  const challenge = crypto.createHash("sha256").update(verifier).digest("base64url");
+  await pool.query(
+    `INSERT INTO public.google_oauth_states (state_hash, nonce, code_verifier, expires_at)
+     VALUES ($1, $2, $3, NOW() + INTERVAL '10 minutes')`,
+    [hashSessionToken(state), nonce, verifier]
+  );
+  setGoogleStateCookie(response, state);
+  const authorization = new URL("https://accounts.google.com/o/oauth2/v2/auth");
+  authorization.search = new URLSearchParams({
+    client_id: config.clientId,
+    redirect_uri: config.redirectUri,
+    response_type: "code",
+    scope: "openid email profile",
+    state,
+    nonce,
+    code_challenge: challenge,
+    code_challenge_method: "S256",
+    prompt: "select_account"
+  }).toString();
+  redirectTo(response, authorization.href);
+}
+
+async function googleSigningKeys(forceRefresh = false) {
+  if (!forceRefresh && googleKeysCache && googleKeysCache.expiresAt > Date.now()) return googleKeysCache.keys;
+  const response = await fetch("https://www.googleapis.com/oauth2/v3/certs", { signal: AbortSignal.timeout(10000) });
+  if (!response.ok) throw new Error("Could not verify Google sign-in.");
+  const body = await response.json();
+  if (!Array.isArray(body.keys)) throw new Error("Google returned invalid signing keys.");
+  const cacheHeader = response.headers.get("cache-control") || "";
+  const maxAgeMatch = cacheHeader.match(/max-age=(\d+)/i);
+  const maxAgeSeconds = maxAgeMatch ? Math.min(Number(maxAgeMatch[1]), 3600) : 300;
+  googleKeysCache = { keys: body.keys, expiresAt: Date.now() + maxAgeSeconds * 1000 };
+  return body.keys;
+}
+
+async function verifyGoogleIdToken(idToken, expectedNonce, clientId) {
+  if (typeof idToken !== "string" || idToken.length > 20000) throw new Error("Google sign-in could not be verified.");
+  const parts = idToken.split(".");
+  if (parts.length !== 3) throw new Error("Google sign-in could not be verified.");
+  let header;
+  let claims;
+  try {
+    header = JSON.parse(Buffer.from(parts[0], "base64url").toString("utf8"));
+    claims = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8"));
+  } catch {
+    throw new Error("Google sign-in could not be verified.");
+  }
+  if (header.alg !== "RS256" || typeof header.kid !== "string") throw new Error("Google sign-in could not be verified.");
+  let keys = await googleSigningKeys();
+  let jwk = keys.find((key) => key.kid === header.kid && key.kty === "RSA");
+  if (!jwk) {
+    keys = await googleSigningKeys(true);
+    jwk = keys.find((key) => key.kid === header.kid && key.kty === "RSA");
+  }
+  if (!jwk) throw new Error("Google sign-in could not be verified.");
+  const publicKey = crypto.createPublicKey({ key: jwk, format: "jwk" });
+  const signature = Buffer.from(parts[2], "base64url");
+  const signatureValid = crypto.verify("RSA-SHA256", Buffer.from(parts[0] + "." + parts[1]), publicKey, signature);
+  const now = Math.floor(Date.now() / 1000);
+  const audienceValid = claims.aud === clientId || (Array.isArray(claims.aud) && claims.aud.includes(clientId));
+  const authorizedPartyValid = !Array.isArray(claims.aud) || claims.aud.length <= 1 || claims.azp === clientId;
+  const issuerValid = claims.iss === "https://accounts.google.com" || claims.iss === "accounts.google.com";
+  if (!signatureValid || !issuerValid || !audienceValid || !authorizedPartyValid
+      || !Number.isFinite(claims.exp) || claims.exp <= now
+      || !Number.isFinite(claims.iat) || claims.iat > now + 60
+      || !safeEqualText(claims.nonce, expectedNonce)
+      || (claims.email_verified !== true && claims.email_verified !== "true")
+      || typeof claims.sub !== "string" || !claims.sub
+      || typeof claims.email !== "string" || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(claims.email)) {
+    throw new Error("Google sign-in could not be verified.");
+  }
+  return claims;
+}
+
+async function finishGoogleSignIn(request, response, requestUrl, pool) {
+  const origin = appOrigin(request);
+  const loginUrl = new URL("/login.html?auth=google_failed", origin).href;
+  const state = requestUrl.searchParams.get("state") || "";
+  const cookieState = cookieValue(request, GOOGLE_STATE_COOKIE);
+  if (!safeEqualText(state, cookieState) || !/^[A-Za-z0-9_-]{43}$/.test(state)) {
+    clearGoogleStateCookie(response);
+    redirectTo(response, loginUrl);
+    return;
+  }
+  const stored = await pool.query(
+    `DELETE FROM public.google_oauth_states
+     WHERE state_hash = $1 AND expires_at > NOW()
+     RETURNING nonce, code_verifier`,
+    [hashSessionToken(state)]
+  );
+  clearGoogleStateCookie(response);
+  const pending = stored.rows[0];
+  const code = requestUrl.searchParams.get("code");
+  if (!pending || !code || requestUrl.searchParams.has("error")) {
+    redirectTo(response, new URL("/login.html?auth=google_failed", origin).href);
+    return;
+  }
+  try {
+    const config = googleConfig(request);
+    const tokenResponse = await fetch("https://oauth2.googleapis.com/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        client_id: config.clientId,
+        client_secret: config.clientSecret,
+        code,
+        code_verifier: pending.code_verifier,
+        grant_type: "authorization_code",
+        redirect_uri: config.redirectUri
+      }),
+      signal: AbortSignal.timeout(10000)
+    });
+    if (!tokenResponse.ok) throw new Error("Google token exchange failed.");
+    const tokenBody = await tokenResponse.json();
+    const claims = await verifyGoogleIdToken(tokenBody.id_token, pending.nonce, config.clientId);
+    const userToken = await findOrCreateGoogleUser(pool, claims);
+    setSessionCookie(response, userToken);
+    redirectTo(response, new URL("/dashboard.html", origin).href);
+  } catch (error) {
+    console.error("Google sign-in failed:", error.message);
+    redirectTo(response, loginUrl);
+  }
+}
+
+async function findOrCreateGoogleUser(pool, claims) {
+  const email = claims.email.trim().toLowerCase();
+  const fallbackName = typeof claims.name === "string" ? claims.name.trim().split(/\s+/) : [];
+  const firstName = String(claims.given_name || fallbackName[0] || email.split("@")[0]).trim().slice(0, 80);
+  const lastName = String(claims.family_name || fallbackName.slice(1).join(" ") || "").trim().slice(0, 80);
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [claims.sub]);
+    let result = await client.query(
+      "SELECT id, role, google_sub, email_verified_at FROM public.astro_users WHERE google_sub = $1 FOR UPDATE",
+      [claims.sub]
+    );
+    let user = result.rows[0];
+    if (!user) {
+      result = await client.query(
+        "SELECT id, role, google_sub, email_verified_at FROM public.astro_users WHERE lower(email) = $1 FOR UPDATE",
+        [email]
+      );
+      user = result.rows[0];
+    }
+    if (user) {
+      if (user.role !== "customer" || (user.google_sub && user.google_sub !== claims.sub)) {
+        throw new Error("This account cannot be signed in with that Google account.");
+      }
+      if (!user.email_verified_at) {
+        await client.query("DELETE FROM public.login_sessions WHERE user_id = $1", [user.id]);
+      }
+      await client.query(
+        `UPDATE public.astro_users
+         SET google_sub = $1, email_verified_at = COALESCE(email_verified_at, NOW()),
+             password_hash = CASE WHEN email_verified_at IS NULL THEN NULL ELSE password_hash END,
+             first_name = COALESCE(first_name, $2), last_name = COALESCE(last_name, $3)
+         WHERE id = $4`,
+        [claims.sub, firstName, lastName, user.id]
+      );
+    } else {
+      result = await client.query(
+        `INSERT INTO public.astro_users
+           (first_name, last_name, email, password_hash, google_sub, email_verified_at, role)
+         VALUES ($1, $2, $3, NULL, $4, NOW(), 'customer')
+         RETURNING id`,
+        [firstName, lastName, email, claims.sub]
+      );
+      user = result.rows[0];
+    }
+    const token = await createLoginSession(client, user.id);
+    await client.query("COMMIT");
+    return token;
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function sendVerificationEmail(request, pool, user) {
+  const apiKey = process.env.RESEND_API_KEY;
+  const from = process.env.EMAIL_FROM;
+  if (!apiKey || !from) throw new Error("Email verification is not configured yet.");
+  const origin = appOrigin(request);
+  const token = crypto.randomBytes(32).toString("base64url");
+  const tokenHash = hashSessionToken(token);
+  await pool.query("DELETE FROM public.email_verification_tokens WHERE user_id = $1", [user.id]);
+  await pool.query(
+    `INSERT INTO public.email_verification_tokens (token_hash, user_id, expires_at)
+     VALUES ($1, $2, NOW() + ($3::int * INTERVAL '1 hour'))`,
+    [tokenHash, user.id, EMAIL_VERIFICATION_TTL_HOURS]
+  );
+  const verificationUrl = new URL("/api/verify-email", origin);
+  verificationUrl.searchParams.set("token", token);
+  const emailResponse = await fetch("https://api.resend.com/emails", {
+    method: "POST",
+    headers: { Authorization: "Bearer " + apiKey, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      from,
+      to: [user.email],
+      subject: "Verify your Astro Alok Tripathi account",
+      text: "Verify your email address within one hour: " + verificationUrl.href,
+      html: '<p>Use this link to verify your email address. It expires in one hour.</p><p><a href="'
+        + verificationUrl.href + '">Verify my email</a></p><p>If you did not create this account, you can ignore this message.</p>'
+    }),
+    signal: AbortSignal.timeout(10000)
+  });
+  if (!emailResponse.ok) {
+    await pool.query("DELETE FROM public.email_verification_tokens WHERE token_hash = $1", [tokenHash]);
+    throw new Error("Could not send the account verification email.");
+  }
+}
+
+async function finishEmailVerification(request, response, requestUrl, pool) {
+  const token = requestUrl.searchParams.get("token") || "";
+  const origin = appOrigin(request);
+  if (!/^[A-Za-z0-9_-]{43}$/.test(token)) {
+    redirectTo(response, new URL("/login.html?verification=invalid", origin).href);
+    return;
+  }
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const result = await client.query(
+      `DELETE FROM public.email_verification_tokens
+       WHERE token_hash = $1 AND expires_at > NOW()
+       RETURNING user_id`,
+      [hashSessionToken(token)]
+    );
+    if (!result.rows[0]) {
+      await client.query("ROLLBACK");
+      redirectTo(response, new URL("/login.html?verification=invalid", origin).href);
+      return;
+    }
+    const updated = await client.query(
+      `UPDATE public.astro_users SET email_verified_at = COALESCE(email_verified_at, NOW())
+       WHERE id = $1 AND role = 'customer' RETURNING id`,
+      [result.rows[0].user_id]
+    );
+    if (!updated.rows[0]) throw new Error("The account could not be verified.");
+    await client.query("DELETE FROM public.login_sessions WHERE user_id = $1", [updated.rows[0].id]);
+    const sessionToken = await createLoginSession(client, updated.rows[0].id);
+    await client.query("COMMIT");
+    setSessionCookie(response, sessionToken);
+    redirectTo(response, new URL("/dashboard.html", origin).href);
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 async function requireCustomerConversation(pool, customerId) {
@@ -237,6 +583,21 @@ async function requireCustomerConversation(pool, customerId) {
 async function handleApi(request, response, requestUrl, pool, chatConnections) {
   const pathname = requestUrl.pathname;
   const method = request.method;
+  if (pathname === "/api/google/start" && method === "GET") {
+    if (await rateLimited(pool, request, pathname, response)) return;
+    await beginGoogleSignIn(request, response, pool);
+    return;
+  }
+  if (pathname === "/api/google/callback" && method === "GET") {
+    response.setHeader("Referrer-Policy", "no-referrer");
+    await finishGoogleSignIn(request, response, requestUrl, pool);
+    return;
+  }
+  if (pathname === "/api/verify-email" && method === "GET") {
+    response.setHeader("Referrer-Policy", "no-referrer");
+    await finishEmailVerification(request, response, requestUrl, pool);
+    return;
+  }
   if (method === "POST" && !sameOrigin(request)) {
     sendJson(response, 403, { error: "This request must come from the website." });
     return;
@@ -250,8 +611,8 @@ async function handleApi(request, response, requestUrl, pool, chatConnections) {
     if (user) {
       const token = cookieValue(request, SESSION_COOKIE);
       await pool.query(
-        "UPDATE public.login_sessions SET expires_at = NOW() + INTERVAL '10 years' WHERE token_hash = $1",
-        [hashSessionToken(token)]
+        "UPDATE public.login_sessions SET expires_at = NOW() + ($2::int * INTERVAL '1 day') WHERE token_hash = $1",
+        [hashSessionToken(token), SESSION_DAYS]
       );
       setSessionCookie(response, token);
     }
@@ -259,51 +620,78 @@ async function handleApi(request, response, requestUrl, pool, chatConnections) {
     return;
   }
   if ((pathname === "/api/signup" || pathname === "/api/login") && method === "POST") {
-    if (rateLimited(request, pathname, response)) return;
+    if (await rateLimited(pool, request, pathname, response)) return;
     const body = await readJson(request);
     const validationError = validateCredentials(body, { requireName: pathname === "/api/signup" });
     if (validationError) {
       sendJson(response, 400, { error: validationError });
       return;
     }
+    if (pathname === "/api/signup" && body.privacyConsent !== true) {
+      sendJson(response, 400, { error: "Please accept the Privacy Policy to create an account." });
+      return;
+    }
     const email = body.email.trim().toLowerCase();
     if (pathname === "/api/signup") {
-      const client = await pool.connect();
+      if (!process.env.RESEND_API_KEY || !process.env.EMAIL_FROM) {
+        sendJson(response, 503, { error: "Email verification is not configured yet." });
+        return;
+      }
+      const passwordHash = await hashPassword(body.password);
+      let user;
       try {
-        await client.query("BEGIN");
-        const passwordHash = await hashPassword(body.password);
-        const inserted = await client.query(
-          "INSERT INTO public.astro_users (first_name, last_name, email, password_hash, role) VALUES ($1, $2, $3, $4, 'customer') RETURNING id, first_name, last_name, email, role",
+        const inserted = await pool.query(
+          `INSERT INTO public.astro_users
+             (first_name, last_name, email, password_hash, role)
+           VALUES ($1, $2, $3, $4, 'customer')
+           RETURNING id, email`,
           [body.firstName.trim(), body.lastName.trim(), email, passwordHash]
         );
-        const token = await createLoginSession(client, inserted.rows[0].id);
-        await client.query("COMMIT");
-        setSessionCookie(response, token);
-        sendJson(response, 201, { user: { id: String(inserted.rows[0].id), firstName: inserted.rows[0].first_name, lastName: inserted.rows[0].last_name, email: inserted.rows[0].email, role: inserted.rows[0].role } });
+        user = inserted.rows[0];
       } catch (error) {
-        await client.query("ROLLBACK");
-        if (error.code === "23505") {
-          sendJson(response, 409, { error: "An account with this email already exists." });
-        } else {
-          throw error;
+        if (error.code !== "23505") throw error;
+        const existing = await pool.query(
+          `SELECT id, email, password_hash, email_verified_at
+           FROM public.astro_users WHERE lower(email) = $1`,
+          [email]
+        );
+        if (existing.rows[0] && !existing.rows[0].email_verified_at && existing.rows[0].password_hash
+            && await verifyPassword(body.password, existing.rows[0].password_hash)) {
+          user = existing.rows[0];
         }
-      } finally {
-        client.release();
       }
+      if (user) await sendVerificationEmail(request, pool, user);
+      sendJson(response, 202, { ok: true });
       return;
     }
     const result = await pool.query(
-      "SELECT id, email, role, password_hash FROM public.astro_users WHERE email = $1 AND role = 'customer'",
+      `SELECT id, email, role, password_hash, email_verified_at
+       FROM public.astro_users WHERE email = $1 AND role = 'customer'`,
       [email]
     );
     const user = result.rows[0];
-    const valid = user ? await verifyPassword(body.password, user.password_hash) : false;
+    const valid = await verifyPassword(body.password, user && user.password_hash || DUMMY_PASSWORD_HASH);
     if (!valid) {
       sendJson(response, 401, { error: "Email or password is incorrect." });
       return;
     }
+    if (!user.email_verified_at) {
+      if (!process.env.RESEND_API_KEY || !process.env.EMAIL_FROM) {
+        sendJson(response, 503, { error: "Email verification is not configured yet." });
+        return;
+      }
+      if (user.password_hash) await sendVerificationEmail(request, pool, user);
+      sendJson(response, 403, { error: "Verify your email address before signing in. Check your inbox for a verification link." });
+      return;
+    }
     const client = await pool.connect();
     try {
+      if (user.password_hash.startsWith("scrypt$")) {
+        const parts = user.password_hash.split("$");
+        if (parts.length === 3) {
+          await client.query("UPDATE public.astro_users SET password_hash = $1 WHERE id = $2", [await hashPassword(body.password), user.id]);
+        }
+      }
       const token = await createLoginSession(client, user.id);
       setSessionCookie(response, token);
       sendJson(response, 200, { user: { id: String(user.id), email: user.email, role: user.role } });
@@ -313,7 +701,7 @@ async function handleApi(request, response, requestUrl, pool, chatConnections) {
     return;
   }
   if (pathname === "/api/password" && method === "POST") {
-    if (rateLimited(request, pathname, response)) return;
+    if (await rateLimited(pool, request, pathname, response)) return;
     const user = await currentUser(request, pool);
     if (!user) {
       sendJson(response, 401, { error: "Sign in to change your password." });
@@ -325,8 +713,8 @@ async function handleApi(request, response, requestUrl, pool, chatConnections) {
       sendJson(response, 400, { error: validationError });
       return;
     }
-    if (!body || typeof body.currentPassword !== "string" || typeof body.confirmPassword !== "string") {
-      sendJson(response, 400, { error: "Enter your current password and confirm the new password." });
+    if (!body || typeof body.confirmPassword !== "string") {
+      sendJson(response, 400, { error: "Confirm your new password." });
       return;
     }
     if (body.newPassword !== body.confirmPassword) {
@@ -337,13 +725,44 @@ async function handleApi(request, response, requestUrl, pool, chatConnections) {
       "SELECT password_hash FROM public.astro_users WHERE id = $1 AND role = 'customer'",
       [user.id]
     );
-    const matches = account.rows[0] && await verifyPassword(body.currentPassword, account.rows[0].password_hash);
-    if (!matches) {
-      sendJson(response, 401, { error: "Current password is incorrect." });
+    if (!account.rows[0]) {
+      sendJson(response, 401, { error: "Your account could not be verified." });
       return;
     }
+    if (account.rows[0].password_hash) {
+      const matches = typeof body.currentPassword === "string"
+        && await verifyPassword(body.currentPassword, account.rows[0].password_hash);
+      if (!matches) {
+        sendJson(response, 401, { error: "Current password is incorrect." });
+        return;
+      }
+    } else {
+      const token = cookieValue(request, SESSION_COOKIE);
+      const recentAuth = await pool.query(
+        `SELECT 1 FROM public.login_sessions
+         WHERE token_hash = $1 AND created_at > NOW() - INTERVAL '15 minutes'`,
+        [hashSessionToken(token)]
+      );
+      if (recentAuth.rowCount === 0) {
+        sendJson(response, 401, { error: "Sign in with Google again before setting a password." });
+        return;
+      }
+    }
     const passwordHash = await hashPassword(body.newPassword);
-    await pool.query("UPDATE public.astro_users SET password_hash = $1 WHERE id = $2", [passwordHash, user.id]);
+    const token = cookieValue(request, SESSION_COOKIE);
+    const tokenHash = hashSessionToken(token);
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("UPDATE public.astro_users SET password_hash = $1 WHERE id = $2", [passwordHash, user.id]);
+      await client.query("DELETE FROM public.login_sessions WHERE user_id = $1 AND token_hash <> $2", [user.id, tokenHash]);
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
     sendJson(response, 200, { ok: true });
     return;
   }
@@ -363,7 +782,7 @@ async function handleApi(request, response, requestUrl, pool, chatConnections) {
     return;
   }
   if (pathname === "/api/pooja-enquiries" && method === "POST") {
-    if (rateLimited(request, pathname, response)) return;
+    if (await rateLimited(pool, request, pathname, response)) return;
     const body = await readJson(request);
     const validationError = validatePoojaEnquiry(body);
     if (validationError) {
@@ -879,6 +1298,9 @@ async function initializeDatabase(pool) {
   const schema = await fs.promises.readFile(path.resolve(__dirname, "../database/schema.sql"), "utf8");
   await pool.query(schema);
   await pool.query("DELETE FROM public.login_sessions WHERE expires_at <= NOW()");
+  await pool.query("DELETE FROM public.email_verification_tokens WHERE expires_at <= NOW()");
+  await pool.query("DELETE FROM public.google_oauth_states WHERE expires_at <= NOW()");
+  await pool.query("DELETE FROM public.auth_rate_limits WHERE window_started_at < NOW() - INTERVAL '1 day'");
 }
 
 async function start() {
