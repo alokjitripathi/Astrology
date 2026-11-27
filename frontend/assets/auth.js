@@ -486,7 +486,6 @@
           room.hidden = false;
           connect();
           startRefresh();
-          startRefresh();
         }
       }).catch(function (error) {
         setError(document.getElementById("chat-consent-error"), error.message);
