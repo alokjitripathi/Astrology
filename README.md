@@ -67,13 +67,18 @@ Run the backend and account tests with `npm test`.
 
 Suggested domain options, subject to availability: `astroaloktripathi.com`, `astroaloktripathi.in`, and `aloktripathiastro.com`.
 
-## Deploy to Render
+## Deploy the full application to Vercel
 
-## Deploy the frontend to Vercel
+Vercel serves the pages and assets from `frontend/` and runs the Node.js API and WebSocket chat from `api/[...route].mjs` as a Vercel Function. The PostgreSQL database must be hosted separately; Vercel Functions connect to it using `DATABASE_URL`.
 
-The Vercel configuration publishes only the static files in `frontend/`. In Vercel, import `alokjitripathi/Astrology` and use the `main` branch; Vercel reads `vercel.json` and serves the frontend without building the Node.js backend. The account, chat, article-management, and database-backed enquiry APIs still require the separate Node.js backend and PostgreSQL deployment described below. Until that backend is deployed and connected, those features will not work on the Vercel-only site.
+To deploy the full application:
 
-The standalone consultation and pooja links that open WhatsApp work without the backend. To make the API-backed forms, sign-in, and chat work, deploy the backend separately and configure the frontend API requests to use that backend origin.
+1. Create a PostgreSQL database with a provider such as Neon. Use its pooled connection string for serverless connections.
+2. In Vercel, import `alokjitripathi/Astrology` and deploy the `main` branch. Leave the project root at the repository root; `vercel.json` configures the static output and API function.
+3. In the Vercel project's **Settings → Environment Variables**, add `DATABASE_URL` with the PostgreSQL connection string and `WHATSAPP_NUMBER` with the public number in digits only, including the country code. Do not commit either value to Git.
+4. Redeploy after setting the variables. The API initializes the tables from `database/schema.sql` when it first connects to PostgreSQL.
+
+Vercel Functions support WebSockets; chat connections close when a function reaches its maximum duration and the website reconnects and reloads saved messages. The Blogger article archive continues to use the public Blogger feed. Creating a production database and setting its connection string are required before accounts, saved enquiries, feedback, or chat can work.
 
 ## Deploy to Render
 

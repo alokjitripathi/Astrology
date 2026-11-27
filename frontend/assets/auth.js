@@ -329,6 +329,7 @@
     let socket = null;
     let reconnectDelay = 1000;
     let reconnectTimer = null;
+    let refreshTimer = null;
     let stopped = false;
     let loadingHistory = false;
     const messageMap = new Map();
@@ -382,6 +383,7 @@
             statusElement.textContent = chatLanguage("Connected conversation with ", "बातचीत: ") + conversation.email;
             loadConversations();
             loadMessages();
+            startRefresh();
           });
           conversationsElement.appendChild(button);
         });
@@ -390,10 +392,19 @@
       }
     }
 
+    function startRefresh() {
+      if (refreshTimer) return;
+      refreshTimer = window.setInterval(function () {
+        loadMessages();
+        if (admin) loadConversations();
+      }, 5000);
+    }
+
     function connect() {
       if (stopped || socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) return;
       const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-      socket = new WebSocket(protocol + "//" + window.location.host + "/ws/chat");
+      socket = new WebSocket(protocol + "//" + window.location.host + "/api/ws");
+      startRefresh();
       socket.addEventListener("open", function () {
         reconnectDelay = 1000;
         statusElement.textContent = chatLanguage("Chat connected. Messages are private to this conversation.", "चैट जुड़ गई है। संदेश इस निजी बातचीत तक सीमित हैं।");
@@ -461,6 +472,7 @@
           statusElement.textContent = chatLanguage("Connected conversation with ", "बातचीत: ") + latest.email;
           loadConversations();
           loadMessages();
+          startRefresh();
         }
       });
       connect();
@@ -473,6 +485,8 @@
           consentPanel.hidden = true;
           room.hidden = false;
           connect();
+          startRefresh();
+          startRefresh();
         }
       }).catch(function (error) {
         setError(document.getElementById("chat-consent-error"), error.message);
@@ -503,6 +517,7 @@
     window.addEventListener("beforeunload", function () {
       stopped = true;
       window.clearTimeout(reconnectTimer);
+      window.clearInterval(refreshTimer);
       if (socket && socket.readyState < WebSocket.CLOSING) socket.close();
     }, { once: true });
   }

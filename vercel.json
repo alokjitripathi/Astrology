@@ -1,4 +1,10 @@
 {
   "version": 2,
-  "outputDirectory": "frontend"
+  "framework": null,
+  "outputDirectory": "frontend",
+  "functions": {
+    "api/[...route].mjs": {
+      "maxDuration": 60
+    }
+  }
 }

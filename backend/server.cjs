@@ -702,7 +702,7 @@ function publicWhatsAppDisplayNumber() {
     : "+" + number;
 }
 
-function createApplication(pool) {
+function createApplication(pool, ensureInitialized = async () => {}) {
   const webSocketServer = new WebSocketServer({ noServer: true, maxPayload: 16 * 1024 });
   const chatConnections = new Set();
   const server = http.createServer(async (request, response) => {
@@ -718,6 +718,7 @@ function createApplication(pool) {
       return;
     }
     try {
+      await ensureInitialized();
       if (requestUrl.pathname.startsWith("/api/")) {
         await handleApi(request, response, requestUrl, pool, chatConnections);
         return;
@@ -770,11 +771,16 @@ function createApplication(pool) {
       socket.end("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n");
       return;
     }
-    if (requestUrl.pathname !== "/ws/chat" || !sameOrigin(request)) {
+    if (requestUrl.pathname !== "/api/ws" && requestUrl.pathname !== "/ws/chat") {
+      socket.end("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n");
+      return;
+    }
+    if (!sameOrigin(request)) {
       socket.end("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");
       return;
     }
     try {
+      await ensureInitialized();
       const user = await currentUser(request, pool);
       if (!user) {
         socket.end("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n");
@@ -868,15 +874,19 @@ function createApplication(pool) {
   return server;
 }
 
+async function initializeDatabase(pool) {
+  await pool.query("SELECT 1");
+  const schema = await fs.promises.readFile(path.resolve(__dirname, "../database/schema.sql"), "utf8");
+  await pool.query(schema);
+  await pool.query("DELETE FROM public.login_sessions WHERE expires_at <= NOW()");
+}
+
 async function start() {
   const pool = new Pool(process.env.DATABASE_URL
     ? { connectionString: process.env.DATABASE_URL }
     : undefined);
   try {
-    await pool.query("SELECT 1");
-    const schema = await fs.promises.readFile(path.resolve(__dirname, "../database/schema.sql"), "utf8");
-    await pool.query(schema);
-    await pool.query("DELETE FROM public.login_sessions WHERE expires_at <= NOW()");
+    await initializeDatabase(pool);
   } catch (error) {
     await pool.end();
     console.error("Could not connect to PostgreSQL or initialize the Astrology database:", error.message);
@@ -915,4 +925,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { createApplication, validateArticle, validateEnquiry };
+module.exports = { createApplication, initializeDatabase, validateArticle, validateEnquiry };
