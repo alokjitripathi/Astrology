@@ -75,7 +75,7 @@ Vercel serves the pages and assets from `frontend/` and runs the Node.js API and
 To deploy the full application:
 
 1. Create a PostgreSQL database with a provider such as Neon. Use its pooled connection string for serverless connections.
-2. In Vercel, import `alokjitripathi/Astrology` and deploy the `main` branch. Leave the project root at the repository root; `vercel.json` configures the static output and API function.
+2. In Vercel, import `alokjitripathi/Astrology` and deploy the `main` branch. In **Settings → Build and Deployment → Root Directory**, leave the directory empty (repository root). Do not set it to `frontend`; the backend, `api/`, database schema, and root `package.json` must be included. `vercel.json` publishes the static files from `frontend/` and the API function from the repository root.
 3. Set these variables in the Vercel project's **Settings → Environment Variables** for Production (and Preview if needed):
    - `DATABASE_URL`: PostgreSQL connection string.
    - `WHATSAPP_NUMBER`: public number in digits only, including the country code.

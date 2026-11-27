@@ -22,4 +22,10 @@ function ensureDatabase() {
   return databaseSetup;
 }
 
-export default createApplication(pool, ensureDatabase);
+const application = createApplication(pool, ensureDatabase);
+
+// Vercel Node Functions invoke a request handler; bridge each invocation into
+// the shared Node HTTP server so the same application handles every /api path.
+export default function handler(request, response) {
+  application.emit("request", request, response);
+}
