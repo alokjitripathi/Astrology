@@ -275,6 +275,22 @@
   function setupPoojaForm() {
     const form = document.getElementById("pooja-form");
     if (!form) return;
+    const poojaSelect = form.elements.poojaType;
+    const poojaChoices = document.querySelectorAll("[data-pooja-choice]");
+    function syncPoojaChoices() {
+      poojaChoices.forEach(function (choice) {
+        choice.setAttribute("aria-pressed", String(choice.dataset.poojaValue === poojaSelect.value));
+      });
+    }
+    poojaChoices.forEach(function (choice) {
+      choice.addEventListener("click", function () {
+        poojaSelect.value = choice.dataset.poojaValue;
+        poojaSelect.dispatchEvent(new Event("change", { bubbles: true }));
+        syncPoojaChoices();
+      });
+    });
+    poojaSelect.addEventListener("change", syncPoojaChoices);
+    syncPoojaChoices();
     const dateInput = form.elements.preferredDate;
     const today = new Date();
     dateInput.min = [today.getFullYear(), String(today.getMonth() + 1).padStart(2, "0"), String(today.getDate()).padStart(2, "0")].join("-");

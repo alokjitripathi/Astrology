@@ -737,9 +737,16 @@ main { position: relative; z-index: 1; flex: 1 0 auto; }
 .pooja-preview-card > span { display: grid; flex: 0 0 46px; width: 46px; height: 46px; place-items: center; color: var(--gold-light); border: 1px solid rgba(198,165,98,.45); border-radius: 50%; font-size: 22px; }
 .pooja-preview-card h3 { margin: 0; color: #f6f2e9; font-size: 14px; font-weight: 600; line-height: 1.6; }
 .pooja-list { display: grid; gap: 9px; margin: 24px 0; padding: 0; list-style: none; }
-.pooja-list li { padding: 10px 13px; color: #364153; border-left: 2px solid var(--gold); background: rgba(255,253,248,.62); font-size: 12px; }
+.pooja-photo-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.pooja-photo-grid li { min-width: 0; padding: 0; border: 0; background: transparent; }
+.pooja-option { display: flex; width: 100%; height: 100%; flex-direction: column; padding: 0; overflow: hidden; color: var(--navy); border: 1px solid rgba(198,165,98,.34); background: rgba(255,253,248,.82); text-align: left; cursor: pointer; transition: border-color .2s ease, box-shadow .2s ease, transform .2s ease; }
+.pooja-option:hover, .pooja-option:focus-visible { border-color: var(--gold); box-shadow: 0 5px 18px rgba(16,28,54,.12); transform: translateY(-2px); }
+.pooja-option[aria-pressed="true"] { border-color: var(--gold); box-shadow: 0 0 0 2px rgba(198,165,98,.26); }
+.pooja-option img { display: block; width: 100%; aspect-ratio: 3 / 2; object-fit: cover; }
+.pooja-option span { display: flex; flex: 1; align-items: center; min-height: 48px; padding: 9px 10px; font-size: 11px; font-weight: 600; line-height: 1.5; }
 .pooja-booking-section .booking-layout { grid-template-columns: .72fr 1.28fr; }
 @media (max-width: 760px) {
+  .pooja-booking-section .booking-layout { grid-template-columns: 1fr; gap: 36px; }
   .experience-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); margin: 34px 0 56px; }
   .experience-facts > div:nth-child(3) { border-left: 0; }
   .experience-facts > div:nth-child(n+3) { border-top: 1px solid rgba(198,165,98,.3); }
