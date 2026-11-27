@@ -69,6 +69,14 @@ Suggested domain options, subject to availability: `astroaloktripathi.com`, `ast
 
 ## Deploy to Render
 
+## Deploy the frontend to Vercel
+
+The Vercel configuration publishes only the static files in `frontend/`. In Vercel, import `alokjitripathi/Astrology` and use the `main` branch; Vercel reads `vercel.json` and serves the frontend without building the Node.js backend. The account, chat, article-management, and database-backed enquiry APIs still require the separate Node.js backend and PostgreSQL deployment described below. Until that backend is deployed and connected, those features will not work on the Vercel-only site.
+
+The standalone consultation and pooja links that open WhatsApp work without the backend. To make the API-backed forms, sign-in, and chat work, deploy the backend separately and configure the frontend API requests to use that backend origin.
+
+## Deploy to Render
+
 This repository includes `render.yaml` for a Render Node.js Web Service and PostgreSQL database. The service uses `npm ci` to install dependencies and runs `node backend/server.cjs` with the environment variables configured in Render. Render supplies `PORT`; the server binds to `0.0.0.0`. The WebSocket client uses the page's HTTPS scheme to connect over WSS, and the server validates the public request origin, so same-origin chat works through Render's HTTPS proxy.
 
 To deploy:
